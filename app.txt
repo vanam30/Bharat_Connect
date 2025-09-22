@@ -1,0 +1,651 @@
+// API service functions for PayrollPayments
+
+// Import your existing HTTP utility and auth functions
+import http from './http'; // Your axios instance
+import { getAuth } from './auth'; // Your auth functions
+
+// Save/Update batch as draft
+export const saveOrUpdateBatchDraft = async (batchData) => {
+  try {
+    const response = await http.post('/batch', batchData);
+    return response.data;
+  } catch (error) {
+    console.error('Error saving batch draft:', error);
+    throw error;
+  }
+};
+
+// Submit batch for approval
+export const submitBatch = async (batchId) => {
+  try {
+    const response = await http.post(`/batch/${batchId}/submit`);
+    return response.data;
+  } catch (error) {
+    console.error('Error submitting batch:', error);
+    throw error;
+  }
+};
+
+// Get batch details
+export const getBatch = async (batchId) => {
+  try {
+    const response = await http.get(`/batch/${batchId}`);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching batch:', error);
+    throw error;
+  }
+};
+
+// Get transaction by ID
+export const getTransaction = async (transactionId) => {
+  try {
+    const response = await http.get(`/transaction/${transactionId}`);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching transaction:', error);
+    throw error;
+  }
+};
+
+// Delete transaction
+export const deleteTransaction = async (transactionId) => {
+  try {
+    await http.delete(`/transaction/${transactionId}`);
+    return true;
+  } catch (error) {
+    console.error('Error deleting transaction:', error);
+    throw error;
+  }
+};
+
+// Change batch status
+export const changeBatchStatus = async (batchId, status) => {
+  try {
+    const response = await http.post(`/batch/${batchId}/status`, { status });
+    return response.data;
+  } catch (error) {
+    console.error('Error changing batch status:', error);
+    throw error;
+  }
+};
+
+// Updated PayrollPayments component with persistence and backend integration
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  Grid, Card, CardContent, Typography, TextField, Button,
+  Box, Table, TableBody, TableCell, TableContainer, TableHead,
+  TableRow, IconButton, MenuItem, Paper, Alert, Snackbar
+} from "@mui/material";
+import { Add, Edit, Delete, Save, Send, Person, Receipt } from "@mui/icons-material";
+
+const PayrollPayments = () => {
+  const [tab, setTab] = useState(0);
+  const [batchId, setBatchId] = useState('');
+  const [originalBatchId, setOriginalBatchId] = useState(''); // Track original batch ID
+  const [form, setForm] = useState({
+    debitAccount: '',
+    creditAccount: '',
+    debitCurrency: '',
+    debitAmount: '',
+    creditCurrency: '',
+    employeeName: '',
+    bankId: '',
+    remarks: ''
+  });
+  const [errors, setErrors] = useState({});
+  const [batchError, setBatchError] = useState('');
+  const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+  const navigate = useNavigate();
+  const [employees, setEmployees] = useState([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [currentBatchTransactions, setCurrentBatchTransactions] = useState([]);
+
+  const currencies = ['INR', 'USD', 'EUR', 'GBP', 'AED'];
+  
+  // Local storage keys
+  const STORAGE_KEY_BATCH_ID = 'payroll_current_batch_id';
+  const STORAGE_KEY_TRANSACTIONS = 'payroll_current_transactions';
+  const STORAGE_KEY_FORM = 'payroll_current_form';
+
+  // Generate unique transaction ID
+  const getTransactionId = () => `BATCH-${batchId}-TXN-${Date.now().toString(36).toUpperCase()}`;
+  
+  // Get current date
+  const getCurrentDate = () => new Date().toISOString().split('T')[0];
+
+  // Load data from localStorage on component mount
+  useEffect(() => {
+    const savedBatchId = localStorage.getItem(STORAGE_KEY_BATCH_ID);
+    const savedTransactions = localStorage.getItem(STORAGE_KEY_TRANSACTIONS);
+    const savedForm = localStorage.getItem(STORAGE_KEY_FORM);
+
+    if (savedBatchId) {
+      setBatchId(savedBatchId);
+      setOriginalBatchId(savedBatchId);
+    }
+    
+    if (savedTransactions) {
+      try {
+        setCurrentBatchTransactions(JSON.parse(savedTransactions));
+      } catch (error) {
+        console.error('Error parsing saved transactions:', error);
+      }
+    }
+
+    if (savedForm) {
+      try {
+        setForm(JSON.parse(savedForm));
+      } catch (error) {
+        console.error('Error parsing saved form:', error);
+      }
+    }
+  }, []);
+
+  // Save to localStorage whenever data changes
+  useEffect(() => {
+    if (batchId) {
+      localStorage.setItem(STORAGE_KEY_BATCH_ID, batchId);
+    } else {
+      localStorage.removeItem(STORAGE_KEY_BATCH_ID);
+    }
+  }, [batchId]);
+
+  useEffect(() => {
+    if (currentBatchTransactions.length > 0) {
+      localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(currentBatchTransactions));
+    } else {
+      localStorage.removeItem(STORAGE_KEY_TRANSACTIONS);
+    }
+  }, [currentBatchTransactions]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_FORM, JSON.stringify(form));
+  }, [form]);
+
+  // Validation functions
+  const validateAccountNumber = (val) => /^[0-9]{8}$/.test(val);
+  const validateBankId = (val) => /^[0-9]{7}$/.test(val);
+  const validateNumeric = (val) => !isNaN(val) && val.trim() !== "";
+  const validateAlphaNumeric = (val) => /^[a-zA-Z0-9 ]+$/.test(val);
+
+  // Handle batch ID change with validation
+  const handleBatchIdChange = (e) => {
+    const newBatchId = e.target.value;
+    
+    // Check if batch ID is being changed after transactions are added
+    if (originalBatchId && newBatchId !== originalBatchId && currentBatchTransactions.length > 0) {
+      setBatchError('Cannot change Batch ID after adding transactions. Please clear all transactions first or save the current batch.');
+      return;
+    }
+    
+    setBatchError('');
+    setBatchId(newBatchId);
+    
+    // If this is the first time setting batch ID with transactions
+    if (!originalBatchId && newBatchId && currentBatchTransactions.length === 0) {
+      setOriginalBatchId(newBatchId);
+    }
+  };
+
+  // Handle input changes with validation
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setForm({ ...form, [name]: value });
+    
+    let errorMsg = "";
+    if (name === "debitAccount" || name === "creditAccount") {
+      if (!validateAccountNumber(value)) errorMsg = "Account number must be 8 digits";
+    } else if (name === "bankId") {
+      if (!validateBankId(value)) errorMsg = "Bank ID must be 7 digits";
+    } else if (name === "debitAmount") {
+      if (!validateNumeric(value)) errorMsg = "Amount must be numeric";
+    } else if (name === "employeeName") {
+      if (!validateAlphaNumeric(value)) errorMsg = "Only letters, numbers and space allowed";
+    }
+    
+    setErrors(prev => ({ ...prev, [name]: errorMsg }));
+  };
+
+  // Show snackbar message
+  const showMessage = (message, severity = 'success') => {
+    setSnackbar({ open: true, message, severity });
+  };
+
+  // Add payment to current batch
+  const handleAddPayment = async () => {
+    // Validate batch ID hasn't changed
+    if (originalBatchId && batchId !== originalBatchId) {
+      showMessage('Please resolve batch ID conflict before adding payments', 'error');
+      return;
+    }
+
+    if (Object.values(errors).some(e => e !== "")) {
+      showMessage('Please fix errors before adding payment', 'error');
+      return;
+    }
+
+    if (!batchId || 
+        !form.debitAccount || 
+        !form.creditAccount || 
+        !form.debitCurrency || 
+        !form.debitAmount || 
+        !form.creditCurrency || 
+        !form.employeeName || 
+        !form.bankId) {
+      showMessage('Fill all required fields including Batch ID', 'error');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const auth = getAuth();
+      const transactionData = {
+        transactionId: getTransactionId(),
+        transactionDate: getCurrentDate(),
+        debitAccount: form.debitAccount,
+        creditAccount: form.creditAccount,
+        debitCurrency: form.debitCurrency,
+        debitAmount: parseFloat(form.debitAmount),
+        creditCurrency: form.creditCurrency,
+        employeeName: form.employeeName,
+        bankId: form.bankId,
+        remarks: form.remarks || "Testing",
+        version: 0
+      };
+
+      // Create batch payload
+      const batchPayload = {
+        batchId: batchId,
+        creationTime: new Date().toISOString(),
+        createdByUserId: parseInt(auth.userId),
+        status: "draft",
+        transactions: [...currentBatchTransactions, transactionData]
+      };
+
+      // Save to backend
+      await saveOrUpdateBatchDraft(batchPayload);
+      
+      // Update local state
+      setCurrentBatchTransactions(prev => [...prev, transactionData]);
+      
+      // Set original batch ID if not set
+      if (!originalBatchId) {
+        setOriginalBatchId(batchId);
+      }
+      
+      // Reset form
+      setForm({
+        debitAccount: '',
+        creditAccount: '',
+        debitCurrency: '',
+        debitAmount: '',
+        creditCurrency: '',
+        employeeName: '',
+        bankId: '',
+        remarks: ''
+      });
+
+      showMessage("Payment added successfully!");
+      
+    } catch (error) {
+      console.error('Error adding payment:', error);
+      showMessage("Error adding payment. Please try again.", 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Submit batch for approval
+  const handleSubmitBatch = async () => {
+    if (currentBatchTransactions.length === 0) {
+      showMessage("No transactions to submit", 'warning');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await submitBatch(batchId);
+      showMessage("Batch submitted for approval successfully!");
+      
+      // Clear everything after successful submission
+      clearAll();
+      
+    } catch (error) {
+      console.error('Error submitting batch:', error);
+      showMessage("Error submitting batch. Please try again.", 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Save batch as draft
+  const handleSaveAsDraft = async () => {
+    if (currentBatchTransactions.length === 0) {
+      showMessage("No transactions to save", 'warning');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const auth = getAuth();
+      const batchPayload = {
+        batchId: batchId,
+        creationTime: new Date().toISOString(),
+        createdByUserId: parseInt(auth.userId),
+        status: "draft",
+        transactions: currentBatchTransactions
+      };
+
+      await saveOrUpdateBatchDraft(batchPayload);
+      showMessage("Batch saved as draft successfully!");
+      
+    } catch (error) {
+      console.error('Error saving draft:', error);
+      showMessage("Error saving draft. Please try again.", 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Delete transaction from batch
+  const handleDeleteTransaction = async (transactionId) => {
+    try {
+      // Remove from backend if needed
+      // await deleteTransaction(transactionId);
+      
+      // Remove from local state
+      const updatedTransactions = currentBatchTransactions.filter(
+        transaction => transaction.transactionId !== transactionId
+      );
+      setCurrentBatchTransactions(updatedTransactions);
+      
+      // If no transactions left, allow batch ID change
+      if (updatedTransactions.length === 0) {
+        setOriginalBatchId('');
+        setBatchError('');
+      }
+      
+      showMessage("Transaction deleted successfully!");
+    } catch (error) {
+      console.error('Error deleting transaction:', error);
+      showMessage("Error deleting transaction", 'error');
+    }
+  };
+
+  // Clear all data
+  const clearAll = () => {
+    setBatchId('');
+    setOriginalBatchId('');
+    setCurrentBatchTransactions([]);
+    setForm({
+      debitAccount: '',
+      creditAccount: '',
+      debitCurrency: '',
+      debitAmount: '',
+      creditCurrency: '',
+      employeeName: '',
+      bankId: '',
+      remarks: ''
+    });
+    setBatchError('');
+    
+    // Clear localStorage
+    localStorage.removeItem(STORAGE_KEY_BATCH_ID);
+    localStorage.removeItem(STORAGE_KEY_TRANSACTIONS);
+    localStorage.removeItem(STORAGE_KEY_FORM);
+  };
+
+  return (
+    <Box sx={{ minWidth: '1300px', ml: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        <Typography variant="h4" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+          Payroll Payments
+        </Typography>
+        
+        <Button variant="contained" color="primary" startIcon={<Send />} onClick={() => navigate('/quick-payments')}>
+          Quick Payment
+        </Button>
+        
+        <Button variant="outlined" color="secondary" onClick={clearAll}>
+          Clear All
+        </Button>
+      </Box>
+
+      {/* Batch ID Error Alert */}
+      {batchError && (
+        <Alert severity="error" onClose={() => setBatchError('')}>
+          {batchError}
+        </Alert>
+      )}
+
+      <Grid container spacing={2}>
+        <Grid item xs={7}>
+          <Card sx={{ height: '100%', maxWidth: '720px' }}>
+            <CardContent>
+              <Typography variant="h6" sx={{ mb: 2, fontWeight: 600, color: 'primary.main' }}>
+                CREATE PAYMENT
+              </Typography>
+              
+              <Grid container spacing={2}>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Batch ID"
+                    name="batchId"
+                    value={batchId}
+                    onChange={handleBatchIdChange}
+                    error={!!batchError}
+                    helperText={batchError || (originalBatchId ? `Original: ${originalBatchId}` : '')}
+                    disabled={originalBatchId && currentBatchTransactions.length > 0}
+                  />
+                </Grid>
+                
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Employee Name"
+                    name="employeeName"
+                    value={form.employeeName}
+                    onChange={handleInputChange}
+                    error={!!errors.employeeName}
+                    helperText={errors.employeeName}
+                  />
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Bank ID"
+                    name="bankId"
+                    value={form.bankId}
+                    onChange={handleInputChange}
+                    error={!!errors.bankId}
+                    helperText={errors.bankId}
+                  />
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Remarks"
+                    name="remarks"
+                    value={form.remarks}
+                    onChange={handleInputChange}
+                  />
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Debit Account"
+                    name="debitAccount"
+                    value={form.debitAccount}
+                    onChange={handleInputChange}
+                    error={!!errors.debitAccount}
+                    helperText={errors.debitAccount}
+                  />
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Credit Account"
+                    name="creditAccount"
+                    value={form.creditAccount}
+                    onChange={handleInputChange}
+                    error={!!errors.creditAccount}
+                    helperText={errors.creditAccount}
+                  />
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    select
+                    label="Debit Currency"
+                    name="debitCurrency"
+                    value={form.debitCurrency}
+                    onChange={handleInputChange}
+                  >
+                    {currencies.map(currency => (
+                      <MenuItem key={currency} value={currency}>
+                        {currency}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    select
+                    label="Credit Currency"
+                    name="creditCurrency"
+                    value={form.creditCurrency}
+                    onChange={handleInputChange}
+                  >
+                    {currencies.map(currency => (
+                      <MenuItem key={currency} value={currency}>
+                        {currency}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Debit Amount"
+                    name="debitAmount"
+                    value={form.debitAmount}
+                    onChange={handleInputChange}
+                    error={!!errors.debitAmount}
+                    helperText={errors.debitAmount}
+                  />
+                </Grid>
+                
+                <Grid item xs={12}>
+                  <Button 
+                    variant="contained" 
+                    color="primary" 
+                    startIcon={<Add />} 
+                    onClick={handleAddPayment}
+                    disabled={isSubmitting || !!batchError}
+                    sx={{ p: 1.8 }}
+                  >
+                    Add Payment
+                  </Button>
+                </Grid>
+              </Grid>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid item xs={5}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {/* Action buttons */}
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <Button 
+                variant="contained" 
+                color="primary" 
+                startIcon={<Send />} 
+                onClick={handleSubmitBatch}
+                disabled={isSubmitting || currentBatchTransactions.length === 0}
+              >
+                Submit for Approval
+              </Button>
+              <Button 
+                variant="outlined" 
+                startIcon={<Save />} 
+                onClick={handleSaveAsDraft}
+                disabled={isSubmitting || currentBatchTransactions.length === 0}
+              >
+                Save as Draft
+              </Button>
+            </Box>
+
+            {/* Display current batch transactions */}
+            {currentBatchTransactions.length > 0 && (
+              <Card>
+                <CardContent>
+                  <Typography variant="h6" sx={{ mb: 2 }}>
+                    Current Batch: {batchId} ({currentBatchTransactions.length} transactions)
+                  </Typography>
+                  <TableContainer>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Employee</TableCell>
+                          <TableCell>Amount</TableCell>
+                          <TableCell>Actions</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {currentBatchTransactions.map((transaction, index) => (
+                          <TableRow key={index}>
+                            <TableCell>{transaction.employeeName}</TableCell>
+                            <TableCell>
+                              {transaction.debitCurrency} {transaction.debitAmount}
+                            </TableCell>
+                            <TableCell>
+                              <IconButton 
+                                size="small" 
+                                color="error"
+                                onClick={() => handleDeleteTransaction(transaction.transactionId)}
+                              >
+                                <Delete />
+                              </IconButton>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </CardContent>
+              </Card>
+            )}
+          </Box>
+        </Grid>
+      </Grid>
+
+      {/* Snackbar for messages */}
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={6000}
+        onClose={() => setSnackbar({ ...snackbar, open: false })}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert 
+          onClose={() => setSnackbar({ ...snackbar, open: false })} 
+          severity={snackbar.severity}
+        >
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
+    </Box>
+  );
+};
+
+export default PayrollPayments;
