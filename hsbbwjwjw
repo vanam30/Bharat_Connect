@@ -1,0 +1,126 @@
+@Entity
+@Table(name = "batch_approvals", uniqueConstraints = {
+  @UniqueConstraint(name = "uq_batch_user_once", columnNames = {"batch_id","username"})
+})
+public class BatchApproval {
+  @Id @GeneratedValue
+  private Long id;
+
+  @Column(name = "batch_id", nullable = false)
+  private String batchId;
+
+  @Column(nullable = false)
+  private String username; // approver's principal name
+
+  @Enumerated(EnumType.STRING)
+  @Column(nullable = false)
+  private Decision decision; // APPROVE or REJECT
+
+  @Column(nullable = false)
+  private java.time.OffsetDateTime decidedAt;
+
+  public enum Decision { APPROVE, REJECT }
+  // getters/setters...
+}
+
+public interface BatchApprovalRepository extends JpaRepository<BatchApproval, Long> {
+  boolean existsByBatchIdAndUsername(String batchId, String username); // quick check [web:324]
+  long countByBatchIdAndDecision(String batchId, BatchApproval.Decision decision); // optional
+  List<BatchApproval> findByBatchId(String batchId);
+}
+
+@PreAuthorize("hasRole('AUTHORIZER')") // only Authorizer may decide [web:333]
+public PayrollBatch changeStatus(String batchId, String action) {
+  PayrollBatch batch = batchRepo.findById(batchId)
+      .orElseThrow(() -> new NotFoundException("Batch not found: " + batchId));
+
+  // No approve/reject on draft
+  String act = (action == null ? "" : action.trim().toUpperCase(java.util.Locale.ROOT));
+  if (batch.getStatus() == BatchStatus.draft && (act.equals("APPROVE") || act.equals("REJECT"))) {
+    throw new BadRequestException("Draft batch cannot be approved or rejected. Submit for approval first.");
+  }
+  if (!act.equals("APPROVE") && !act.equals("REJECT")) {
+    throw new BadRequestException("Action must be APPROVE or REJECT");
+  }
+
+  // Who is acting
+  String username = SecurityContextHolder.getContext().getAuthentication().getName(); // audit [web:146]
+
+  // Enforce “only once” per user per batch
+  if (approvalRepo.existsByBatchIdAndUsername(batchId, username)) {
+    throw new BadRequestException("This authorizer has already acted on the batch.");
+  }
+
+  // Keep thresholds fresh (do not reset approvalsDone)
+  refreshComputedFields(batch); // sets requiredApprovers based on totals [web:324]
+  int required = batch.getRequiredApprovers() == null ? 0 : batch.getRequiredApprovers();
+  int done     = batch.getApprovalsDone();
+
+  // Persist decision
+  var record = new BatchApproval();
+  record.setBatchId(batchId);
+  record.setUsername(username);
+  record.setDecision(act.equals("APPROVE") ? BatchApproval.Decision.APPROVE : BatchApproval.Decision.REJECT);
+  record.setDecidedAt(java.time.OffsetDateTime.now());
+  approvalRepo.save(record);
+
+  if (act.equals("REJECT")) {
+    batch.setStatus(BatchStatus.rejected); // terminal
+    return batchRepo.save(batch);
+  }
+
+  // APPROVE path: increment count and derive status from counts
+  done += 1;
+  batch.setApprovalsDone(done);
+
+  if (done <= 0) {
+    batch.setStatus(BatchStatus.submitted_for_approval);
+  } else if (done < required) {
+    batch.setStatus(BatchStatus.partially_approved);
+  } else {
+    batch.setStatus(BatchStatus.approved);
+  }
+  batch.setRemainingApprovals(Math.max(required - done, 0));
+  return batchRepo.save(batch);
+}
+
+
+
+public interface PayrollBatchRepository extends JpaRepository<PayrollBatch, Long>, PayrollBatchCustom { }
+
+public interface PayrollBatchCustom {
+  Page<PayrollBatch> findPendingForAuthorizer(String username, Pageable pageable);
+}
+
+@Repository
+public class PayrollBatchRepositoryImpl implements PayrollBatchCustom {
+
+  @PersistenceContext
+  private EntityManager em;
+
+  @Override
+  public Page<PayrollBatch> findPendingForAuthorizer(String username, Pageable pageable) {
+    var jpql = """
+      SELECT b FROM PayrollBatch b
+      WHERE b.status IN (com.acme.BatchStatus.submitted_for_approval, com.acme.BatchStatus.partially_approved)
+        AND NOT EXISTS (
+          SELECT 1 FROM BatchApproval a
+          WHERE a.batchId = b.id AND a.username = :u
+        )
+    """;
+    var q = em.createQuery(jpql, PayrollBatch.class)
+              .setParameter("u", username)
+              .setFirstResult((int) pageable.getOffset())
+              .setMaxResults(pageable.getPageSize());
+    var list = q.getResultList();
+
+    var countQ = em.createQuery("""
+      SELECT COUNT(b) FROM PayrollBatch b
+      WHERE b.status IN (com.acme.BatchStatus.submitted_for_approval, com.acme.BatchStatus.partially_approved)
+        AND NOT EXISTS (SELECT 1 FROM BatchApproval a WHERE a.batchId = b.id AND a.username = :u)
+    """, Long.class).setParameter("u", username);
+    long total = countQ.getSingleResult();
+
+    return new org.springframework.data.domain.PageImpl<>(list, pageable, total);
+  }
+}
