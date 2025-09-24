@@ -1,0 +1,60 @@
+@Service
+public class PayrollServiceImpl implements PayrollService {
+
+  private final PayrollBatchRepository batchRepo;
+  private final PayrollTransactionRepository txnRepo;
+
+  // existing constructor...
+
+  @Override
+  @PreAuthorize("hasRole('AUTHORIZER')") // only Authorizer can approve/reject [web:244][web:333]
+  public PayrollBatch changeStatus(String batchId, BatchStatus newStatus) {
+    PayrollBatch batch = batchRepo.findById(batchId)
+        .orElseThrow(() -> new NotFoundException("Batch not found: " + batchId)); // unchanged
+
+    // Transition guardrails (based on your screenshots)
+    if (batch.getStatus() == BatchStatus.draft) {
+      if (newStatus != BatchStatus.submitted_for_approval)
+        throw new BadRequestException("Draft can only move to submitted_for_approval");
+    } else if (batch.getStatus() == BatchStatus.submitted_for_approval) {
+      if (newStatus != BatchStatus.partially_approved
+          && newStatus != BatchStatus.rejected)
+        throw new BadRequestException("Submitted_For_Approval can move to partially_approved/rejected only");
+    } else if (batch.getStatus() == BatchStatus.partially_approved) {
+      if (newStatus != BatchStatus.approved
+          && newStatus != BatchStatus.rejected)
+        throw new BadRequestException("Partially_approved can move to approved/rejected only");
+    } else {
+      throw new ConflictException("Status is final and cannot be changed from: " + batch.getStatus());
+    }
+
+    // Multi-approver bookkeeping
+    // remainingApprovals = max(requiredApprovers - approvalsSoFar, 0)
+    Integer req = batch.getRequiredApprovers();               // already computed in refreshComputedFields(...)
+    Integer done = batch.getApprovalsDone() == null ? 0 : batch.getApprovalsDone();
+
+    // Each authorization counts as one approval when moving forward (not on rejection)
+    boolean isApproval = (newStatus == BatchStatus.partially_approved) || (newStatus == BatchStatus.approved);
+    if (isApproval) {
+      done = done + 1;
+      batch.setApprovalsDone(done);
+      int remaining = Math.max((req == null ? 0 : req) - done, 0);
+      batch.setRemainingApprovals(remaining);
+      // Finalize if reached 0 and we were in partially_approved
+      if (remaining == 0) {
+        newStatus = BatchStatus.approved;
+      } else {
+        // still more approvals needed -> keep partially_approved
+        newStatus = BatchStatus.partially_approved;
+      }
+    } else if (newStatus == BatchStatus.rejected) {
+      // On rejection, remaining approvals may be reset to required (optional policy)
+      batch.setRemainingApprovals(req == null ? 0 : req);
+      batch.setApprovalsDone(0);
+    }
+
+    batch.setStatus(newStatus);
+    refreshComputedFields(batch); // your existing method updates totals and requiredApprovers by amount threshold
+    return batchRepo.save(batch);
+  }
+}
