@@ -1,0 +1,166 @@
+// src/api/approvals.js
+import { http } from './http';
+
+// Only batches the current authorizer can still act on (server filters out self-acted) [web:312]
+export async function getAuthorizerInbox(page = 0, size = 20) {
+  const { data } = await http.get('/api/payroll/batch/authorizer/inbox', { params: { page, size } }); // [web:312]
+  return data;
+}
+
+// Approve one step (server increments approvalsDone, derives status) [web:312]
+export async function approveBatch(batchId, remarks) {
+  const { data } = await http.patch(`/api/payroll/batch/${encodeURIComponent(batchId)}/status`, null, {
+    params: { action: 'APPROVE', remarks }
+  }); // [web:312]
+  return data;
+}
+
+// Reject terminally (server sets rejected) [web:312]
+export async function rejectBatch(batchId, remarks) {
+  const { data } = await http.patch(`/api/payroll/batch/${encodeURIComponent(batchId)}/status`, null, {
+    params: { action: 'REJECT', remarks }
+  }); // [web:312]
+  return data;
+}
+
+
+
+
+________________________________
+
+
+import React, { useEffect, useState } from 'react';
+import { getAuthorizerInbox, approveBatch, rejectBatch } from '../api/approvals';
+import { Button, Chip, CircularProgress, Dialog, DialogTitle, DialogActions,
+         DialogContent, TextField, Snackbar, Alert, Paper, Table, TableRow,
+         TableBody, TableCell, TableHead, Container } from '@mui/material';
+
+export default function ApprovalPage() {
+  const [batches, setBatches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [actionType, setActionType] = useState(null); // 'APPROVE' | 'REJECT'
+  const [remarks, setRemarks] = useState('');
+  const [snack, setSnack] = useState({ open: false, type: 'success', message: '' });
+
+  async function fetchInbox() {
+    setLoading(true);
+    try {
+      const data = await getAuthorizerInbox();  // server-filtered list [web:312]
+      // If backend returns Page, use data.content; else use data directly.
+      const list = Array.isArray(data) ? data : (data?.content || []);
+      setBatches(list);
+    } catch (e) {
+      setSnack({ open: true, type: 'error', message: e?.response?.data || 'Failed to load inbox' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { fetchInbox(); }, []);
+
+  const openDialog = (batch, type) => { setSelected(batch); setActionType(type); };
+  const closeDialog = () => { setSelected(null); setActionType(null); setRemarks(''); };
+
+  async function submitDecision() {
+    if (!selected || !actionType) return;
+    try {
+      if (actionType === 'APPROVE') {
+        await approveBatch(selected.batchId || selected.id, remarks); // server bumps approvalsDone, derives status [web:312]
+      } else {
+        await rejectBatch(selected.batchId || selected.id, remarks);  // server sets rejected [web:312]
+      }
+      setSnack({ open: true, type: 'success', message: `${actionType.toLowerCase()} successful` });
+      await fetchInbox(); // acted batch is hidden for this user by server filtering [web:312]
+    } catch (e) {
+      // If the server enforces “only once” or “draft cannot be decided”, show its message
+      const msg = e?.response?.data || e.message || 'Action failed';
+      setSnack({ open: true, type: 'error', message: msg });
+    } finally {
+      closeDialog();
+    }
+  }
+
+  const statusChip = (s) => {
+    const lc = (s || '').toLowerCase();
+    const def = { label: s, color: 'default' };
+    if (lc.includes('rejected')) return { label: 'REJECTED', color: 'error' };
+    if (lc.includes('approved') && lc.includes('partial')) return { label: 'PARTIALLY APPROVED', color: 'warning' };
+    if (lc.includes('approved')) return { label: 'APPROVED', color: 'success' };
+    if (lc.includes('submitted')) return { label: 'SUBMITTED', color: 'info' };
+    if (lc.includes('draft')) return { label: 'DRAFT', color: 'default' };
+    return def;
+  };
+
+  return (
+    <Container>
+      <Typography variant="h4" gutterBottom sx={{ mt: 3, mb: 3 }}>Payroll Batch Approval System</Typography>
+
+      {loading ? <CircularProgress /> : (
+        <Paper>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Batch ID</TableCell>
+                <TableCell>Status</TableCell>
+                <TableCell>Required Approvers</TableCell>
+                <TableCell>Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {batches.map((batch) => {
+                const chip = statusChip(batch.status);
+                // Show buttons only for states eligible for action; server will still enforce rules
+                const canAct = ['submitted_for_approval','partially_approved'].includes((batch.status || '').toLowerCase());
+                return (
+                  <TableRow key={batch.id || batch.batchId}>
+                    <TableCell>{batch.batchId || batch.id}</TableCell>
+                    <TableCell><Chip label={chip.label} color={chip.color} /></TableCell>
+                    <TableCell>{batch.requiredApprovers}</TableCell>
+                    <TableCell>
+                      <Button variant="contained" color="success" sx={{ mr: 1 }}
+                        disabled={!canAct}
+                        onClick={() => openDialog(batch, 'APPROVE')}>
+                        Approve
+                      </Button>
+                      <Button variant="contained" color="error"
+                        disabled={!canAct}
+                        onClick={() => openDialog(batch, 'REJECT')}>
+                        Reject
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+
+      <Dialog open={!!selected} onClose={closeDialog}>
+        <DialogTitle>{actionType === 'APPROVE' ? 'Approve Batch' : 'Reject Batch'}</DialogTitle>
+        <DialogContent>
+          <TextField
+            label="Remarks"
+            value={remarks}
+            onChange={(e) => setRemarks(e.target.value)}
+            multiline rows={3} fullWidth margin="dense"
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeDialog}>Cancel</Button>
+          <Button variant="contained" onClick={submitDecision}
+            color={actionType === 'APPROVE' ? 'success' : 'error'}>
+            {actionType}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar open={snack.open} autoHideDuration={3000} onClose={() => setSnack(s => ({ ...s, open: false }))}>
+        <Alert severity={snack.type} onClose={() => setSnack(s => ({ ...s, open: false }))}>
+          {snack.message}
+        </Alert>
+      </Snackbar>
+    </Container>
+  );
+}
