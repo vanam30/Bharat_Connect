@@ -1,0 +1,45 @@
+@PreAuthorize("hasRole('AUTHORIZER')") // only Authorizer may change status [web:333][web:244]
+public PayrollBatch changeStatus(String batchId, String action) {
+  PayrollBatch batch = batchRepo.findById(batchId)
+      .orElseThrow(() -> new NotFoundException("Batch not found: " + batchId));
+
+  // Normalize and validate action
+  String act = action == null ? "" : action.trim().toUpperCase(java.util.Locale.ROOT);
+  if (!act.equals("APPROVE") && !act.equals("REJECT")) {
+    throw new BadRequestException("Action must be APPROVE or REJECT");
+  }
+
+  // Compute approver thresholds (do NOT reset approvalsDone here)
+  refreshComputedFields(batch); // keeps requiredApprovers in sync with amount thresholds
+
+  int required = batch.getRequiredApprovers() == null ? 0 : batch.getRequiredApprovers();
+  int done     = batch.getApprovalsDone(); // getter should normalize null→0
+
+  // Apply action
+  if (act.equals("REJECT")) {
+    batch.setStatus(BatchStatus.rejected);
+    // Optionally keep counts or reset; business choice. Keeping them provides audit continuity.
+    return batchRepo.save(batch);
+  }
+
+  // APPROVE path
+  done += 1;                       // one more authorization recorded
+  batch.setApprovalsDone(done);
+
+  // Derive status from counts
+  if (done <= 0) {
+    // no approvals registered yet
+    // prefer submitted_for_approval for submitted batches; if business wants draft for never-submitted, guard elsewhere
+    batch.setStatus(BatchStatus.submitted_for_approval);
+  } else if (done < required) {
+    batch.setStatus(BatchStatus.partially_approved);
+  } else { // done >= required
+    batch.setStatus(BatchStatus.approved);
+  }
+
+  // Keep a convenience value for UI; never negative
+  int remaining = Math.max(required - done, 0);
+  batch.setRemainingApprovals(remaining);
+
+  return batchRepo.save(batch);
+}
