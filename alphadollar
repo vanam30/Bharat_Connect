@@ -1,0 +1,62 @@
+// src/pages/Batches.jsx
+import React, { useEffect, useState } from 'react';
+import { Tabs, Tab, Box, Paper, Typography, Chip } from '@mui/material';
+import { getBatchesAllByStatus } from '../api/payroll';
+
+const tabs = [
+  { key: 'draft',     label: 'Draft',     color: 'default' },
+  { key: 'submitted', label: 'Pending',   color: 'warning' }, // submit for approval
+  { key: 'approved',  label: 'Approved',  color: 'success' },
+  { key: 'rejected',  label: 'Rejected',  color: 'error' }
+];
+
+export default function Batches() {
+  const [grouped, setGrouped] = useState(null);
+  const [idx, setIdx] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const data = await getBatchesAllByStatus();      // one fetch for all groups [web:312]
+        if (live) setGrouped(data);
+      } catch (e) {
+        console.error('Load batches grouped failed', e?.response?.data || e.message);
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+
+  const counts = grouped?.counts || {};
+  const list = grouped?.[tabs[idx].key] || [];
+
+  return (
+    <Paper sx={{ p: 2 }}>
+      <Tabs value={idx} onChange={(_, v) => setIdx(v)} sx={{ mb: 2 }}>
+        {tabs.map((t, i) => (
+          <Tab key={t.key} label={
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <span>{t.label}</span>
+              <Chip size="small" color={t.color} label={counts[t.label.toUpperCase()] ?? counts[t.key.toUpperCase()] ?? 0} />
+            </Box>
+          } />
+        ))}
+      </Tabs>
+
+      {list.length === 0 ? (
+        <Typography variant="body2" sx={{ color: 'text.secondary' }}>No batches in {tabs[idx].label}.</Typography>
+      ) : (
+        <Box component="ul" sx={{ m: 0, p: 0, listStyle: 'none' }}>
+          {list.map((b) => (
+            <Box key={b.id || b.batchId} component="li" sx={{ p: 1.25, borderBottom: '1px solid', borderColor: 'grey.200' }}>
+              <Typography sx={{ fontWeight: 600 }}>{b.batchId || b.id}</Typography>
+              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                {b.status} • {new Date(b.creationTime || b.createdAt || Date.now()).toLocaleString()}
+              </Typography>
+            </Box>
+          ))}
+        </Box>
+      )}
+    </Paper>
+  );
+}
